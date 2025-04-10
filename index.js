@@ -11,24 +11,27 @@ const client = new Client({
 });
 
 // Конфигурация
-const TOKEN = 'DISCORD_TOKEN';
-const TEACHER_ID = 'TEACHER_ID';
-const ROLE_NAME = 'Ученик на преподавател 1';
-const INVITE_FILE = 'trackedInviteCode.json';
-let trackedInviteCode = null;
-let trackedGuildId = null;
+const TOKEN = '[DISCORD_BOT_TOKEN]'; // Твой токен
+const TEACHERS_FILE = 'teachers.json';
+const INVITE_FILE = 'trackedInvites.json';
 
-// Собствена структура за кеширане на използванията на покани
-const inviteUsesCache = new Map();
+// Инициализация на учители и покани
+let teachers = [];
+let trackedInvites = {};
 
-// Зареждаме запазения код на поканата при старт
-if (fs.existsSync(INVITE_FILE)) {
-    const data = fs.readFileSync(INVITE_FILE);
-    const savedData = JSON.parse(data);
-    trackedInviteCode = savedData.code;
-    trackedGuildId = savedData.guildId;
-    console.log(`Зареден код на покана: ${trackedInviteCode} за сървър: ${trackedGuildId}`);
+// Зареждане на учители
+if (fs.existsSync(TEACHERS_FILE)) {
+    teachers = JSON.parse(fs.readFileSync(TEACHERS_FILE)).teachers || [];
+    console.log(`Заредени ${teachers.length} учителя`);
 }
+
+// Зареждане на покани
+if (fs.existsSync(INVITE_FILE)) {
+    trackedInvites = JSON.parse(fs.readFileSync(INVITE_FILE));
+    console.log(`Заредени покани: ${Object.keys(trackedInvites).length}`);
+}
+
+const inviteUsesCache = new Map();
 
 client.once('ready', async () => {
     console.log('Ботът е готов!');
@@ -53,30 +56,70 @@ client.on('inviteCreate', async invite => {
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    if (message.content.startsWith('!private')) {
-        const user = message.mentions.users.first();
-        if (!user) return message.reply('Моля, спомени потребител с @!');
+    // Нова команда за помощ
+    if (message.content === '!help') {
+        const helpMessage = `
+**Списък с команди:**
 
-        const guild = message.guild;
-        const channel = await guild.channels.create({
-            name: `private-${teacher.Used.username}-${user.username}`,
-            type: 0,
-            permissionOverwrites: [
-                { id: guild.id, deny: ['ViewChannel'] },
-                { id: message.author.id, allow: ['ViewChannel', 'SendMessages'] },
-                { id: user.id, allow: ['ViewChannel', 'SendMessages'] },
-                { id: client.user.id, allow: ['ViewChannel', 'SendMessages'] }
-            ],
-        });
-        channel.send(`Здравей, ${user}! Това е нашият private чат с ${message.author}.`);
-        message.reply(`Създадох private чат: ${channel}`);
+\`!add-teacher @учител Име на роля\`
+- **Описание**: Добавя нов учител и свързва роля за неговите ученици.
+- **Пример**: \`!add-teacher @Teacher1 Ученик на преподавател 1\`
+- **Права**: Изисква разрешение за управление на сървъра.
+
+\`!generate-invite @учител\`
+- **Описание**: Създава покана, която автоматично дава ролята на споменатия учител на новоприсъединилите се.
+- **Пример**: \`!generate-invite @Teacher1\`
+- **Права**: Изисква разрешение за създаване на покани.
+
+\`!create-private-channels\`
+- **Описание**: Създава частни канали за всички ученици на всички учители, ако още нямат такива.
+- **Пример**: \`!create-private-channels\`
+- **Права**: Изисква разрешение за управление на канали.
+
+**Забележки**:
+- Увери се, че ролите съществуват в сървъра преди да използваш командите.
+- Ботът автоматично създава канал за ученик, когато му бъде добавена роля на учител, и променя името на канала, ако псевдонимът на ученика се промени.
+        `;
+        message.reply(helpMessage);
     }
 
-    if (message.content === '!generate-invite') {
+    // Нова команда за добавяне на учител
+    if (message.content.startsWith('!add-teacher')) {
+        if (!message.member.permissions.has('ManageGuild')) {
+            return message.reply('Нямаш права да изпълняваш тази команда!');
+        }
+
+        const args = message.content.split(' ').slice(1);
+        const teacherMention = message.mentions.users.first();
+        const roleName = args.slice(1).join(' ');
+
+        if (!teacherMention || !roleName) {
+            return message.reply('Употреба: `!add-teacher @учител Име на роля`');
+        }
+
+        const teacherId = teacherMention.id;
+        if (teachers.some(t => t.id === teacherId)) {
+            return message.reply('Този учител вече е добавен!');
+        }
+
+        teachers.push({ id: teacherId, role: roleName });
+        fs.writeFileSync(TEACHERS_FILE, JSON.stringify({ teachers }, null, 2));
+        message.reply(`Добавен учител <@${teacherId}> с роля "${roleName}"`);
+    }
+
+    // Генериране на покана за конкретен учител
+    if (message.content.startsWith('!generate-invite')) {
         if (!message.member.permissions.has('CreateInstantInvite')) {
             return message.reply('Нямаш права да създаваш покани!');
         }
 
+        const args = message.content.split(' ').slice(1);
+        const teacherMention = message.mentions.users.first();
+        if (!teacherMention || !teachers.some(t => t.id === teacherMention.id)) {
+            return message.reply('Моля, спомени валиден учител (напр. `!generate-invite @учител`)');
+        }
+
+        const teacher = teachers.find(t => t.id === teacherMention.id);
         try {
             const invite = await message.channel.createInvite({
                 maxAge: 0,
@@ -85,92 +128,109 @@ client.on('messageCreate', async message => {
             });
 
             inviteUsesCache.set(`${message.guild.id}-${invite.code}`, invite.uses || 0);
-            trackedInviteCode = invite.code;
-            trackedGuildId = message.guild.id;
-            fs.writeFileSync(INVITE_FILE, JSON.stringify({ code: trackedInviteCode, guildId: trackedGuildId }));
+            trackedInvites[invite.code] = { guildId: message.guild.id, role: teacher.role };
+            fs.writeFileSync(INVITE_FILE, JSON.stringify(trackedInvites, null, 2));
 
-            console.log(`Създадох линк: ${invite.url}`);
-            message.reply(`Ето линк: ${invite.url}\nВсеки, който влезе чрез този линк, ще получи ролята "${ROLE_NAME}".`);
+            console.log(`Създадох линк: ${invite.url} за роля "${teacher.role}"`);
+            message.reply(`Ето линк: ${invite.url}\nВсеки, който влезе чрез този линк, ще получи ролята "${teacher.role}".`);
         } catch (err) {
             console.error('Грешка при създаване на покана:', err);
             message.reply('Не можах да създам покана. Провери правата ми!');
         }
     }
 
-    if (message.content === '!list-invites') {
-        try {
-            const invites = await message.guild.invites.fetch();
-            if (invites.size === 0) {
-                return message.reply('Няма активни покани в сървъра.');
-            }
-            const inviteList = invites.map(invite => `${invite.url} (Код: ${invite.code}, Използвания: ${invite.uses})`).join('\n');
-            message.reply(`Активни покани:\n${inviteList}`);
-        } catch (err) {
-            console.error('Грешка при извличане на покани:', err);
-            message.reply('Не можах да извлека поканите. Провери правата ми!');
+    // Създаване на частни канали за всички учители
+    if (message.content === '!create-private-channels') {
+        if (!message.member.permissions.has('ManageChannels')) {
+            return message.reply('Нямаш права да изпълняваш тази команда!');
         }
+
+        const guild = message.guild;
+        let createdChannels = 0;
+
+        for (const teacher of teachers) {
+            const role = guild.roles.cache.find(r => r.name === teacher.role);
+            if (!role) {
+                console.log(`Ролята "${teacher.role}" не е намерена!`);
+                continue;
+            }
+
+            const teacherMember = await guild.members.fetch(teacher.id).catch(() => null);
+            if (!teacherMember) continue;
+
+            await guild.members.fetch();
+            const membersWithRole = guild.members.cache.filter(m => m.roles.cache.has(role.id) && !m.user.bot);
+
+            for (const member of membersWithRole.values()) {
+                const nickname = member.nickname || member.user.username;
+                const existingChannel = guild.channels.cache.find(c =>
+                    c.name === nickname.toLowerCase() &&
+                    c.permissionOverwrites.cache.has(member.id)
+                );
+
+                if (!existingChannel) {
+                    const channel = await guild.channels.create({
+                        name: nickname.toLowerCase(),
+                        type: 0,
+                        permissionOverwrites: [
+                            { id: guild.id, deny: ['ViewChannel'] },
+                            { id: teacher.id, allow: ['ViewChannel', 'SendMessages'] },
+                            { id: member.id, allow: ['ViewChannel', 'SendMessages'] },
+                            { id: client.user.id, allow: ['ViewChannel', 'SendMessages'] }
+                        ],
+                    });
+                    await channel.send(`Здравей, ${member}! Това е нашият приватен чат с ${teacherMember.user.username}.`);
+                    createdChannels++;
+                }
+            }
+        }
+
+        message.reply(`Готово! Създадени са ${createdChannels} нови канала.`);
     }
 });
 
 client.on('guildMemberAdd', async member => {
     const guild = member.guild;
+    const newInvites = await guild.invites.fetch();
 
-    if (trackedGuildId && guild.id !== trackedGuildId) {
-        console.log(`Потребителят ${member.user.tag} се присъедини към друг сървър`);
-        return;
+    let usedInviteCode = null;
+    for (const [code, invite] of newInvites) {
+        const cacheKey = `${guild.id}-${code}`;
+        const cachedUses = inviteUsesCache.get(cacheKey) || 0;
+        if (invite.uses > cachedUses) {
+            usedInviteCode = code;
+            inviteUsesCache.set(cacheKey, invite.uses);
+            break;
+        }
     }
 
-    try {
-        const newInvites = await guild.invites.fetch();
-        console.log(`Нова покана използвана от ${member.user.username}`);
-
-        let usedInviteCode = null;
-        for (const [code, invite] of newInvites) {
-            const cacheKey = `${guild.id}-${code}`;
-            const cachedUses = inviteUsesCache.get(cacheKey) || 0;
-            console.log(`Покана ${code}: кеш ${cachedUses} -> ново ${invite.uses}`);
-            if (invite.uses > cachedUses) {
-                usedInviteCode = code;
-                inviteUsesCache.set(cacheKey, invite.uses);
-                break;
-            }
+    if (trackedInvites[usedInviteCode]) {
+        const { role } = trackedInvites[usedInviteCode];
+        const discordRole = guild.roles.cache.find(r => r.name === role);
+        if (discordRole) {
+            await member.roles.add(discordRole);
+            console.log(`Добавих ролята "${role}" на ${member.user.tag}`);
         }
-
-        console.log(`Used invite: ${usedInviteCode || 'undefined'}, Tracked: ${trackedInviteCode}`);
-
-        if (usedInviteCode === trackedInviteCode) {
-            const role = guild.roles.cache.find(r => r.name === ROLE_NAME);
-            if (role) {
-                await member.roles.add(role);
-                console.log(`Добавих ролята "${ROLE_NAME}" на ${member.user.tag}`);
-            } else {
-                console.log(`Ролята "${ROLE_NAME}" не е намерена!`);
-            }
-        } else {
-            console.log(`Потребителят не е използвал следената покана.`);
-        }
-
-        // Обновяваме кеша за всички покани
-        newInvites.forEach(invite => {
-            inviteUsesCache.set(`${guild.id}-${invite.code}`, invite.uses);
-        });
-    } catch (err) {
-        console.error(`Грешка при обработка на нов потребител: ${member.user.tag}`, err);
     }
+
+    newInvites.forEach(invite => {
+        inviteUsesCache.set(`${guild.id}-${invite.code}`, invite.uses);
+    });
 });
 
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    const role = newMember.guild.roles.cache.find(r => r.name === ROLE_NAME);
-    if (!role) return;
+    for (const teacher of teachers) {
+        const role = newMember.guild.roles.cache.find(r => r.name === teacher.role);
+        if (!role) continue;
 
-    const hadRoleBefore = oldMember.roles.cache.has(role.id);
-    const hasRoleNow = newMember.roles.cache.has(role.id);
+        const hadRoleBefore = oldMember.roles.cache.has(role.id);
+        const hasRoleNow = newMember.roles.cache.has(role.id);
 
-    if (!hadRoleBefore && hasRoleNow) {
-        try {
-            const teacher = await newMember.guild.members.fetch(TEACHER_ID);
+        if (!hadRoleBefore && hasRoleNow) {
+            const teacherMember = await newMember.guild.members.fetch(teacher.id);
+            const nickname = newMember.nickname || newMember.user.username;
             const channel = await newMember.guild.channels.create({
-                name: `${newMember.user.username}`,
+                name: nickname.toLowerCase(),
                 type: 0,
                 permissionOverwrites: [
                     { id: newMember.guild.id, deny: ['ViewChannel'] },
@@ -179,9 +239,21 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
                     { id: client.user.id, allow: ['ViewChannel', 'SendMessages'] }
                 ],
             });
-            channel.send(`Здравей, ${newMember}! Това е нашият приватен чат с ${teacher.user.username}.`);
-        } catch (err) {
-            console.error(`Грешка при създаване на канал за ${newMember.user.tag}:`, err);
+            channel.send(`Здравей, ${newMember}! Това е нашият приватен чат с ${teacherMember.user.username}.`);
+        }
+
+        if (oldMember.nickname !== newMember.nickname && hasRoleNow) {
+            const oldNickname = (oldMember.nickname || oldMember.user.username).toLowerCase();
+            const newNickname = (newMember.nickname || newMember.user.username).toLowerCase();
+            const existingChannel = newMember.guild.channels.cache.find(c =>
+                c.name === oldNickname &&
+                c.permissionOverwrites.cache.has(newMember.id) &&
+                c.permissionOverwrites.cache.has(teacher.id)
+            );
+
+            if (existingChannel) {
+                await existingChannel.setName(newNickname);
+            }
         }
     }
 });
